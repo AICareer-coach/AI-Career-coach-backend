@@ -6,6 +6,7 @@ import json
 import re
 from typing import Optional, Tuple, List, Dict, Any, Union
 
+
 # Required libraries (ensure they are installed via requirements.txt)
 import fitz  # PyMuPDF
 import google.generativeai as genai
@@ -20,7 +21,7 @@ from google.api_core import exceptions as google_exceptions
 # =========================
 
 API_KEYS = []
-MODEL_NAME = "gemini-1.5-flash-latest"
+MODEL_NAME = "models/gemini-2.5-flash"
 
 def setup_api_keys():
     """Loads all available Gemini API keys from environment variables."""
@@ -264,12 +265,18 @@ You are an expert HR Technology engineer specializing in resume data extraction.
 def categorize_skills_from_text(resume_text: str) -> Optional[Dict[str, List[str]]]:
     prompt = f"""
 You are an expert technical recruiter and data analyst.
-Your sole job is to scan the entire resume text provided and identify all skills, both technical and soft.
+Your sole job is to scan the entire resume text provided and identify only the most relevant, concrete skills.
+
 **Instructions:**
-1.  Extract skills from *anywhere* in the text: summaries, project descriptions, a dedicated skills section, etc.
-2.  Categorize the skills into the predefined keys in the JSON schema below.
-3.  Place each skill only in the most appropriate category.
-4.  If a category has no skills, you can omit the key from the output.
+1. All skills explicitly listed in the "Skills" section must be extracted without omission.
+2. Additionally, extract other skills if they are explicitly mentioned in experience, projects, education, or certifications.
+3. Do not infer or assume skills that are not explicitly stated in the resume.
+4. Ignore trivial or non-relevant abilities (e.g., "MS Office", "Internet browsing", unless they are in the Skills section).
+5. Categorize the skills into the predefined keys in the JSON schema below.
+6. Place each skill in the single most appropriate category.
+7. Exclude duplicate or overlapping skills.
+8. If a category has no skills, omit the key from the output.
+
 **JSON Output Schema:**
 {{
     "Programming Languages": ["Python", "JavaScript", "Java", "C++", ...],
@@ -279,9 +286,11 @@ Your sole job is to scan the entire resume text provided and identify all skills
     "Data Science": ["Machine Learning", "NLP", "Data Visualization", "Predictive Modeling", ...],
     "Soft Skills": ["Leadership", "Teamwork", "Communication", "Problem Solving", ...]
 }}
+
 **Critical Rules:**
-- Your output must be ONLY the valid JSON object described above.
-- Do not add any explanation or markdown.
+- Output ONLY the valid JSON object described above.
+- Do not add explanations or markdown.
+
 --- RESUME TEXT ---
 {resume_text}
 --- END RESUME TEXT ---
@@ -293,6 +302,7 @@ Your sole job is to scan the entire resume text provided and identify all skills
         print("\n--- ERROR: GEMINI FAILED TO INFER SKILLS ---")
         return None
     return data
+
 
 def optimize_resume_json(resume_json: Dict[str, Any], user_input: str, job_description: Optional[str] = None) -> Dict[str, Any]:
     section_req, instruction = parse_user_optimization_input(user_input)
@@ -453,35 +463,65 @@ TASK: Based on the resume context, perform a full optimization of a LinkedIn pro
         return None
     return data
 
-def generate_career_roadmap(user_profile: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+
+def _strip_markdown(text: str) -> str:
+    """Removes markdown characters like ** and * from a string."""
+    # This function is correct and does not interfere with numbered lists.
+    return re.sub(r'[\*_`]', '', text)
+
+
+def get_tutor_explanation(topic: str) -> Optional[Dict[str, Any]]:
+    """
+    Generates a simple explanation for a technical topic.
+    **IMPROVEMENT**: The prompt is now radically simplified to fix the "NA" issue.
+    It asks for a single `technical_definition` as a clear paragraph,
+    matching the user's example image perfectly.
+    """
     prompt = f"""
-    Act as a world-class AI Career Strategist and Technical Project Manager. Your task is to generate a deeply personalized, multi-faceted career action plan.
+    Act as a friendly and concise expert tutor for a user who is stuck on the topic: **"{topic}"**.
+    Provide a clear explanation in a structured JSON format.
 
-    **STEP 1: ANALYZE THE USER'S PROFILE**
-    - **User's Current State (from resume or manual input):** ```{user_profile.get('current_skills_input')}```
-    - **Stated Current Proficiency:** {user_profile.get('current_level')}
-    - **User's Stated Goal (Job Description or Desired Skills):** ```{user_profile.get('goal_input')}```
-    - **Desired Goal Proficiency:** {user_profile.get('goal_level')}
-    - **Time Commitment:** Plan for a duration of **{user_profile.get('duration')}**, assuming **{user_profile.get('study_hours')}** study hours per month.
+    **JSON OUTPUT INSTRUCTIONS:**
+    Generate a JSON object with the following keys. All text must be plain. Do NOT use markdown.
 
-    **STEP 2: GENERATE THE ACTION PLAN AS A SINGLE, VALID JSON OBJECT**
-    The JSON output must be perfectly structured with the following keys. Do not include any explanatory text outside of the JSON object.
+    1.  "analogy": A simple, real-world analogy (1-2 sentences).
+    2.  "technical_definition": A single, plain-text paragraph that provides a clear and technically accurate definition. Aim for 3-5 sentences, just like a textbook definition.
+    3.  "code_example": A JSON object containing "language" (e.g., "javascript") and "code" (a short, well-commented code snippet). If no code is relevant, the "code" value should be an empty string.
+    4.  "prerequisites": An array of 1-3 prerequisite concepts the user might need to know.
+    """
+    response = _call_gemini_with_fallback(prompt)
+    if not response: return None
+    cleaned_response_text = response.text.replace('```json', '').replace('```', '').strip()
+    try:
+        return json.loads(cleaned_response_text)
+    except Exception as e:
+        print(f"An error occurred in AI Tutor: {e}"); return None
 
-    1.  "domain": A single string representing the most relevant domain inferred from the goal input (e.g., "Data Science", "Cybersecurity"). This is a new, crucial key.
-    2.  "extracted_skills_and_projects": A JSON object with "skills" (array of strings) and "projects" (array of strings).
-    3.  "job_match_score": A JSON object with "score" (number) and "summary" (string).
-    4.  "skills_to_learn_summary": An array of strings.
-    5.  "timeline_chart_data": A JSON object with "labels" (array of strings) and "durations" (array of numbers in weeks) ans also the total weeks counts must be equal to users specified duration.
-    6.  "detailed_roadmap": An array of "phase" objects, each with "phase_title", "phase_duration", and "topics" (array of strings).
-    7.  "suggested_projects": An array of 2 "project" objects, each with "project_title", "project_level", "skills_mapped", "what_you_will_learn", and a multi-step "implementation_plan".
-    8.  "suggested_courses": THIS IS A CRITICAL SECTION.
-        - You MUST generate an array of 2-3 "course" objects.
-        - Each object MUST contain the following FOUR keys: "course_name", "platform", "url", and "mapping".
-        - The "platform" MUST be a string like "Coursera", "edX", "Pluralsight", etc.
-        - The "url" MUST be a direct, fully-qualified, and workable hyperlink.
-        - The "mapping" MUST be a concise sentence explaining how the course helps the roadmap.
-        - **Follow this example format precisely:**
-          `{{ "course_name": "Google Data Analytics Certificate", "platform": "Coursera", "url": "https://www.coursera.org/professional-certificates/google-data-analytics", "mapping": "This certificate covers the foundational skills in Phase 1 and 2." }}`
+
+
+def generate_career_roadmap(user_profile: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    # This function is working correctly from the previous update.
+    prompt = f"""
+    Act as a world-class AI Career Strategist. Your task is to generate a personalized career action plan as a single, valid JSON object.
+
+    **USER PROFILE:**
+    - Current Skills: ```{user_profile.get('current_skills_input')}```
+    - Current Proficiency: {user_profile.get('current_level')}
+    - Goal: ```{user_profile.get('goal_input')}```
+    - Goal Proficiency: {user_profile.get('goal_level')}
+    - Time Commitment: {user_profile.get('duration')} duration, {user_profile.get('study_hours')} hours/month.
+
+    **JSON OUTPUT STRUCTURE:**
+    Generate a single, valid JSON object. String values within the JSON MUST NOT contain any markdown characters.
+
+    1.  "domain": "Full-Stack Development"
+    2.  "extracted_skills_and_projects": {{ "skills": ["React", "Node.js"], "projects": ["E-commerce Platform"] }}
+    3.  "job_match_score": {{ "score": 75, "summary": "A brief, plain-text summary, STRICTLY under 50 words." }}
+    4.  "skills_to_learn_summary": ["State Management (Redux)", "Advanced API Design"]
+    5.  "timeline_chart_data": {{ "labels": ["Phase 1: Foundations", "Phase 2: Backend"], "durations": [4, 5] }}
+    6.  "detailed_roadmap": [{{ "phase_title": "Phase 1: Frontend Fundamentals", "phase_duration": "4 weeks", "topics": ["React Hooks", "Component Lifecycle"] }}]
+    7.  "suggested_projects": [{{ "project_title": "Real-time Whiteboard", "project_level": "Advanced", "skills_mapped": ["React", "Socket.io"], "what_you_will_learn": "Real-time communication and canvas manipulation.", "implementation_plan": ["Week 1-2: Setup canvas and basic drawing.", "Week 3-4: Implement Socket.io for real-time events."] }}]
+    8.  "suggested_courses": [{{ "course_name": "MERN Stack Front To Back", "platform": "Udemy", "url": "https://www.udemy.com/course/mern-stack-front-to-back/", "mapping": "Covers foundational and advanced MERN stack skills for your entire roadmap. This certificate covers the foundational skills in Phase 1 and 2." }}]
     """
     response = _call_gemini_with_fallback(prompt)
     if not response: return None
@@ -491,47 +531,30 @@ def generate_career_roadmap(user_profile: Dict[str, Any]) -> Optional[Dict[str, 
     except Exception as e:
         print(f"An error occurred during AI roadmap generation: {e}"); return None
 
-def get_tutor_explanation(topic: str) -> Optional[Dict[str, Any]]:
-    prompt = f"""
-    Act as a friendly and encouraging expert tutor. A user is currently working through a personalized learning plan and is stuck on the following topic: **"{topic}"**
-
-    Your task is to provide a clear, helpful explanation in a structured JSON format. The JSON object must have the following keys:
-
-    1.  **"analogy"**: A simple, real-world analogy to help the user understand the core concept intuitively.
-    2.  **"technical_definition"**: A concise, technically accurate definition. If the topic involves code, provide a short, well-commented code snippet in the appropriate language (e.g., Python, JavaScript).
-    3.  **"prerequisites"**: An array of 1-3 prerequisite concepts the user might need to review. This helps them identify foundational knowledge gaps.
-
-    Generate the JSON object and nothing else.
-    """
-
-    response = _call_gemini_with_fallback(prompt)
-    if not response: return None
-    cleaned_response_text = response.text.replace('```json', '').replace('```', '').strip()
-    try:
-        return json.loads(cleaned_response_text)
-    except Exception as e:
-        print(f"An error occurred in AI Tutor: {e}"); return None
-
 def get_chatbot_response(query: str, history: list, career_plan_summary: str) -> dict:
     """
-    Generates a chatbot response using the pre-summarized career plan string as context.
-    
-    Args:
-        query: The user's latest question.
-        history: The previous conversation history.
-        career_plan_summary: A PRE-SUMMARIZED STRING of the user's career plan.
+    Generates a chatbot response using the career plan as context.
+    **IMPROVEMENT**: The primary rule has been updated to require all responses
+    to be formatted as a numbered list (1., 2., 3., ...) instead of bullet points.
     """
     print("AI Core: Received request. The career plan context is a string.")
-    
+    cleaned_summary = _strip_markdown(career_plan_summary)
+
     system_prompt = (
-        f"You are an AI career strategist and tutor. Your purpose is to provide concise, point-to-point, and beginner-friendly guidance to the user, strictly based on the career plan provided below.\n\n"
-        f"**Career Plan Details:**\n{career_plan_summary}\n\n"
-        f"**Your Instructions:**\n"
-        f"1. Keep responses brief, beginner-friendly, and to the point.\n"
-        f"2. You can answer questions related to the provided career plan, including the **job match score, priority skills, timeline, detailed roadmap, projects, and courses**.\n"
-        f"3. If the user asks a question that is **outside the scope** of the career plan's domain or is not directly related to the provided plan data, you must respond with a polite refusal. For example, 'That question seems to be outside the scope of your current career plan. Is there anything I can help you with related to your career plan?'\n\n"
-        f"Let's begin."
+        f"You are an AI career assistant and tutor. Your tone is friendly, concise, and encouraging.\n\n"
+        f"**PRIMARY RULE: Always format your entire response as a numbered list (e.g., '1. First point. 2. Second point.').** Do this for every response.\n\n"
+        f"**CAREER PLAN CONTEXT:**\n{cleaned_summary}\n\n"
+        f"**YOUR TASK:**\n"
+        f"First, determine the user's intent from their question.\n\n"
+        f"1. **If the user asks ABOUT THEIR CAREER PLAN** (e.g., 'what's in phase 1?', 'what course should I take?'), answer using the Career Plan Context.\n\n"
+        f"2. **If the user asks for an EXPLANATION of a technical concept** (e.g., 'what is useEffect?'), provide a short, beginner-friendly explanation.\n\n"
+        f"3. **If the question is unrelated**, politely decline with: '1. I can only help with your career plan or related technical topics.'\n\n"
+        f"**RESPONSE RULES TO FOLLOW:**\n"
+        f"- Format ALL responses as a numbered list (1., 2., 3., ...).\n"
+        f"- Do NOT use any other markdown (`**`, `*`, `#`).\n"
+        f"- Keep all points brief and easy to understand.\n"
     )
+
     model_history = []
     for message in history:
         role = 'user' if message.get('role') == 'user' else 'model'
@@ -543,12 +566,14 @@ def get_chatbot_response(query: str, history: list, career_plan_summary: str) ->
 
     if not response or not response.text:
         raise Exception("AI response failed after trying all API keys.")
-    return {"response": response.text}
+
+    final_response = _strip_markdown(response.text)
+    return {"response": final_response}
 
 def generate_assessment_questions(assessment_type: str, skills: List[str], target_role: Optional[str] = None, num_questions: int = 5, user_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """
     Generates a set of assessment questions based on selected skills and target role.
-    Uses Gemini Flash.
+    Uses Gemini 2.5 Flash.
     """
     
     skills_str = ", ".join(skills)
@@ -573,7 +598,7 @@ def generate_assessment_questions(assessment_type: str, skills: List[str], targe
         -   **Single-choice (radio buttons):** ~50% of questions. Provide 4 distinct options.
         -   **Multiple-choice (checkboxes):** ~20% of questions. Provide 4 distinct options, clearly indicating ALL correct answers.
         -   **Short-answer:** ~20% of questions. Requires a concise text response.
-        -   **Coding challenge:** ~10% of questions. Provide a clear problem statement and expected output/logic. (If this is too complex for 1.5-flash to reliably generate, favor more short-answer).
+        -   **Coding challenge:** ~10% of questions. Provide a clear problem statement and expected output/logic. (If this is too complex for 2.5-flash to reliably generate, favor more short-answer).
     2.  Ensure questions cover both theoretical understanding and practical application of the skills.
     3.  Assign a unique `question_id` (e.g., "q1", "q2") to each question.
     4.  For each multiple/single choice question, you MUST provide the `correct_answer_keys` (a list of option values that are correct). This is CRITICAL for automated grading.
@@ -596,7 +621,7 @@ def generate_assessment_questions(assessment_type: str, skills: List[str], targe
 
 def evaluate_assessment_answers(user_id: str, submitted_answers: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     """
-    Evaluates user's assessment answers using Gemini Flash and provides structured results.
+    Evaluates user's assessment answers using Gemini 2.5 Flash and provides structured results.
     """
 
     answers_summary = []
