@@ -78,6 +78,10 @@ app.include_router(interview.router, prefix="/api/interview", tags=["Mock Interv
 async def root():
     return {"message": "AI Career Coach Backend is running!"}
 
+@app.get("/health")
+async def health_check():
+    return {"status": "ok"}
+
 # ------------------------------
 # Local Development Only
 # ------------------------------
