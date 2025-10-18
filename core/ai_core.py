@@ -5,6 +5,7 @@ import sys
 import json
 import re
 from typing import Optional, Tuple, List, Dict, Any, Union
+from groq import Groq
 
 
 # Required libraries (ensure they are installed via requirements.txt)
@@ -843,18 +844,42 @@ def get_interview_chat_response(job_description: str, history: List[Dict[str, st
     return {"reply": response.text}
     # --- END MODIFIED SECTION ---
 
-def get_interview_summary(job_description: str, history: List[Dict[str, str]]) -> Optional[Dict[str, Any]]:
+def get_interview_summary(job_description: str, history: List[Dict[str, str]], proctoring_data: Optional[Dict] = None) -> Optional[Dict[str, Any]]:
     """
     Analyzes the full interview transcript and provides a performance summary,
-    now with API key fallback.
+    now with special handling for malpractice and forced termination.
     """
-    # This is your original logic for creating the transcript. It remains unchanged.
     transcript = "\n".join([f"{msg['role']}: {msg['content']}" for msg in history])
+    
+    # --- NEW: Build a proctoring context for the AI ---
+    proctoring_context = ""
+    if proctoring_data:
+        termination_reason = proctoring_data.get('termination_reason')
+        if termination_reason:
+            proctoring_context = f"""
+            CRITICAL CONTEXT: The interview was terminated early due to malpractice.
+            Reason: {termination_reason}
+            """
+        else:
+            # Build a summary of warnings if the interview was not terminated
+            warnings = []
+            if proctoring_data.get('tab_switch_count', 0) > 0:
+                warnings.append(f"{proctoring_data['tab_switch_count']} tab switch(es)")
+            if proctoring_data.get('phone_detection_count', 0) > 0:
+                warnings.append(f"{proctoring_data['phone_detection_count']} phone detection(s)")
+            if proctoring_data.get('no_person_warnings', 0) > 0:
+                warnings.append(f"{proctoring_data['no_person_warnings']} instance(s) of no person being detected")
+            if proctoring_data.get('multiple_person_warnings', 0) > 0:
+                warnings.append(f"{proctoring_data['multiple_person_warnings']} instance(s) of multiple people being detected")
+            
+            if warnings:
+                proctoring_context = f"Proctoring Note: The candidate received warnings for: {', '.join(warnings)}."
 
-    # This is your original, detailed prompt for the AI. It also remains unchanged.
     prompt = f"""
     You are an expert career coach and technical recruiter. Your task is to analyze the following mock interview transcript and provide a performance summary.
     
+    {proctoring_context}
+
     **Job Description Context:**
     ```
     {job_description}
@@ -866,34 +891,33 @@ def get_interview_summary(job_description: str, history: List[Dict[str, str]]) -
     ```
 
     **Your Analysis Task:**
-    Based on the job description and the transcript, provide a detailed analysis in a valid JSON object. The JSON must have the following keys:
-    1.  `"overall_score"`: An integer from 0 to 100 representing the candidate's overall performance.
-    2.  `"strengths"`: A list of 2-3 specific, positive points about the candidate's performance, citing examples from the transcript.
-    3.  `"areas_for_improvement"`: A list of 2-3 specific, constructive points for improvement, citing examples.
-    4.  `"overall_feedback"`: A concise paragraph summarizing the performance and providing a final recommendation.
+    Provide a detailed analysis in a valid JSON object with the following keys:
+    1.  `"overall_score"`: An integer from 0 to 100.
+    2.  `"strengths"`: A list of 2-3 positive points.
+    3.  `"areas_for_improvement"`: A list of 2-3 constructive points.
+    4.  `"overall_feedback"`: A concise summary paragraph.
 
     **Critical Rules:**
-    - Your final output must be ONLY the valid JSON object. Do not include markdown or any other text.
-    - Be honest and constructive in your feedback.
+    - If the "CRITICAL CONTEXT" section indicates the interview was terminated, you MUST:
+      1. State the termination reason clearly at the beginning of the `overall_feedback`.
+      2. Assign an `overall_score` below 30.
+      3. List "Maintaining interview integrity" as the primary area for improvement.
+    - If there is a "Proctoring Note", incorporate it into your feedback on professionalism or focus.
+    - Your final output must be ONLY the valid JSON object.
     """
-    # 1. Call the API using our new fallback function.
     response = _call_gemini_with_fallback(prompt)
 
-    # 2. Handle the case where all API keys failed.
     if not response or not response.text:
         print("Error generating interview summary after all fallbacks.")
         return None
 
-    # 3. Process the successful response just like before.
     summary_data = _safe_json_loads(response.text, fallback=None)
     
     if not summary_data:
-        print("\n--- ERROR: GEMINI FAILED TO GENERATE VALID INTERVIEW SUMMARY (even with a successful API call) ---")
-        print("API Response Text:", response.text)
+        print("\n--- ERROR: GEMINI FAILED TO GENERATE VALID INTERVIEW SUMMARY ---")
         return None
 
     return summary_data
-    # --- END MODIFIED SECTION ---```
 
 
 def save_resume_json_to_docx(resume_json: Dict[str, Any]) -> Document:
@@ -979,3 +1003,87 @@ def save_resume_json_to_docx(resume_json: Dict[str, Any]) -> Document:
             
     print("\n✅ DOCX document generated in memory.")
     return doc
+
+def get_feedback_on_transcript(transcript: str, question: str, job_description: str) -> Optional[Dict[str, str]]:
+    """
+    Takes a text transcript and gets feedback and the next question from Gemini.
+    This is the new, simpler function that replaces video processing.
+    """
+    try:
+        print(f"DEBUG(ai_core): Getting feedback for transcript: '{transcript}'")
+        
+        # This prompt is the same as before, but now it's guaranteed to get a transcript
+        prompt = f"""
+        You are an expert career coach analyzing a mock interview answer.
+        Job Description Context: {job_description}
+        The question asked was: "{question}"
+        The candidate's spoken answer (transcribed) was: "{transcript}"
+
+        Your Task:
+        1. Provide brief, constructive feedback on the candidate's answer based on the STAR method, clarity, and relevance.
+        2. Generate the next logical interview question.
+        JSON Output Schema: {{ "feedback": "string", "next_question": "string" }}
+        Rule: Respond ONLY with the valid JSON object.
+        """
+
+        gemini_response = _call_gemini_with_fallback(prompt)
+        if not gemini_response:
+            raise Exception("Gemini call failed during feedback generation.")
+
+        return _safe_json_loads(gemini_response.text)
+
+    except Exception as e:
+        print(f"CRITICAL ERROR in get_feedback_on_transcript: {e}")
+        return None # Return None on failure
+    
+def process_audio_answer(audio_content: bytes, question: str, job_description: str) -> Optional[Dict[str, str]]:
+    """
+    The new, robust pipeline for interview analysis using Groq + Whisper.
+    1. Transcribes audio to text using the Whisper-1 model via Groq API.
+    2. Sends the high-quality transcript to Gemini for feedback.
+    """
+    try:
+        # Step 1: Transcribe Audio using Whisper-1 via Groq
+        print("DEBUG(ai_core): Sending audio content to Groq API for Whisper transcription...")
+        groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+        
+        # We need to wrap the bytes content in a file-like object for the API
+        audio_file = ("answer.webm", audio_content, "audio/webm")
+        
+        transcription = groq_client.audio.transcriptions.create(
+            file=audio_file,
+            model="whisper-large-v3", # State-of-the-art model
+        )
+        
+        transcript = transcription.text
+        if not transcript or not transcript.strip():
+            raise ValueError("Transcription result was empty.")
+            
+        print(f"DEBUG(ai_core): High-quality transcript received: '{transcript}'")
+
+        # Step 2: Send transcript to Gemini for analysis
+        prompt = f"""
+        You are an expert career coach analyzing a mock interview answer.
+        Job Description Context: {job_description}
+        The question asked was: "{question}"
+        The candidate's spoken answer (transcribed) was: "{transcript}"
+
+        Your Task:
+        1. Provide brief, constructive feedback on the candidate's answer based on the STAR method and relevance.
+        2. Generate the next logical interview question.
+        JSON Output Schema: {{ "feedback": "string", "next_question": "string" }}
+        Rule: Respond ONLY with the valid JSON object.
+        """
+
+        gemini_response = _call_gemini_with_fallback(prompt)
+        if not gemini_response:
+            raise Exception("Gemini call failed during feedback generation.")
+
+        return _safe_json_loads(gemini_response.text)
+
+    except Exception as e:
+        print(f"CRITICAL ERROR in process_audio_answer: {e}")
+        return {
+            "feedback": "A technical error occurred while processing your answer. Please try recording again for the same question.",
+            "next_question": question
+        }
