@@ -34,7 +34,7 @@ def setup_api_keys():
     while True:
         key = os.getenv(f"GEMINI_API_KEY_{i}")
         if i == 1 and not key:
-             key = os.getenv("GOOGLE_API_KEY") # Backward compatibility for the first key
+             key = os.getenv("GEMINI_API_KEY") # Backward compatibility for the first key
 
         if key:
             API_KEYS.append(key)
