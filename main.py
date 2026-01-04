@@ -79,6 +79,10 @@ app.include_router(leaderboard.router, prefix="/api/leaderboard", tags=["Leaderb
 async def root():
     return {"message": "AI Career Coach Backend is running!"}
 
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
 # ------------------------------
 # Local Development Only
 # ------------------------------
