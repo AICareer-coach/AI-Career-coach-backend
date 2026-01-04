@@ -17,6 +17,7 @@ from docx.shared import Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from google.api_core import exceptions as google_exceptions
 
+
 # =========================
 # Setup (MODIFIED FOR FALLBACK)
 # =========================
@@ -797,11 +798,10 @@ def get_interview_chat_response(job_description: str, history: List[Dict[str, st
     else: # Default to Medium
         personality_prompt = """
         Your Persona: You are a professional team lead for a mid-level role.
-        Your Goal: Assess the candidate's practical skills and real-world project experience. Ask behavioral and technical questions that require specific examples (e.g., "Tell me about a time you had to deal with significant technical debt. How did you handle it and what was the outcome?").
-        Your Tone: Objective and focused.
-        Your First Action: Start with a question about the candidate's most relevant experience from their resume, tying it to the job description.
+        Your Goal: Evaluate the candidate's practical competence and fit for the team. Ask a mix of conceptual questions and practical scenarios (e.g., "How would you handle a merge conflict in Git?" or "Explain the concept of 'hoisting' in JavaScript.").
+        Your Tone: Professional, direct, and balanced.
+        Your First Action: Start with a standard technical screening question.
         """
-
     # This is your original logic for preparing the chat history.
     # It also remains completely unchanged.
     formatted_history = [{'role': msg['role'], 'parts': [{'text': msg['content']}]} for msg in history]
@@ -843,6 +843,52 @@ def get_interview_chat_response(job_description: str, history: List[Dict[str, st
 
     return {"reply": response.text}
     # --- END MODIFIED SECTION ---
+
+def generate_user_comparison(user1_profile: Dict[str, Any], user2_profile: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    Compares two user profiles using Gemini to highlight strengths, skill gaps, and providing a recommendation.
+    """
+    
+    prompt = f"""
+    You are an expert HR Talent Analyst. Your task is to compare two candidates based on their profiles and provide a structured comparison.
+    
+    **Candidate 1:**
+    - Name: {user1_profile.get('name', 'N/A')}
+    - Email: {user1_profile.get('email', 'N/A')}
+    - Total Score: {user1_profile.get('score', 0)}
+    - Skills: {user1_profile.get('skills', [])}
+    - Stats: {user1_profile.get('stats', {})}
+    
+    **Candidate 2:**
+    - Name: {user2_profile.get('name', 'N/A')}
+    - Email: {user2_profile.get('email', 'N/A')}
+    - Total Score: {user2_profile.get('score', 0)}
+    - Skills: {user2_profile.get('skills', [])}
+    - Stats: {user2_profile.get('stats', {})}
+    
+    **Output JSON Schema:**
+    Generate a SINGLE structured JSON object with the following keys. Do NOT use markdown.
+    {{
+        "common_skills": ["List of skills both have"],
+        "user1_distinct_skills": ["Skills unique to Candidate 1"],
+        "user2_distinct_skills": ["Skills unique to Candidate 2"],
+        "comparison_summary": "A concise paragraph comparing their overall profiles, highlighting who might be better suited for different types of roles.",
+        "user1_strengths": ["Key strength 1", "Key strength 2"],
+        "user2_strengths": ["Key strength 1", "Key strength 2"],
+        "recommendation": "A neutral, objective sentence recommending how to decide between them (e.g., 'Choose Candidate A for frontend-heavy roles, Candidate B for backend focus')."
+    }}
+    """
+
+    response = _call_gemini_with_fallback(prompt)
+    if not response: return None
+    
+    data = _safe_json_loads(response.text, fallback=None)
+    if not data:
+        print("\n--- ERROR: GEMINI FAILED TO GENERATE COMPARISON ---")
+        return None
+        
+    return data
+
 
 def get_interview_summary(job_description: str, history: List[Dict[str, str]], proctoring_data: Optional[Dict] = None) -> Optional[Dict[str, Any]]:
     """
@@ -918,7 +964,6 @@ def get_interview_summary(job_description: str, history: List[Dict[str, str]], p
         return None
 
     return summary_data
-
 
 def save_resume_json_to_docx(resume_json: Dict[str, Any]) -> Document:
     doc = Document()
@@ -1003,6 +1048,11 @@ def save_resume_json_to_docx(resume_json: Dict[str, Any]) -> Document:
             
     print("\n✅ DOCX document generated in memory.")
     return doc
+
+# ai_core.py
+
+# You can REMOVE the 'from google.cloud import speech' import
+# You can REMOVE the Firebase Admin initialization and imports if only used for this feature
 
 def get_feedback_on_transcript(transcript: str, question: str, job_description: str) -> Optional[Dict[str, str]]:
     """
