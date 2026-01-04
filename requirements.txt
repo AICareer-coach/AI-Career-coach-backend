@@ -8,3 +8,11 @@ python-dotenv
 python-docx
 pydantic[email]
 groq
+google-api-python-client
+google-auth
+google-cloud-vision
+google-cloud-storage
+PyPDF2
+beautifulsoup4
+playwright
+requests
