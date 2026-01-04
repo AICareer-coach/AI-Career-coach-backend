@@ -319,6 +319,53 @@ class DatabaseManager:
         user_doc_ref.update({'lastUpdatedAt': firestore.SERVER_TIMESTAMP})
         print(f" -> Optimized data for user UID {user_uid} has been fully updated in Firestore.")
 
+
+
+    def get_leaderboard(self, limit: int = 50) -> List[Dict[str, Any]]:
+        """
+        Fetches users and sorts them by a calculated 'activity score'.
+        Score = roadmaps + resumes + assessments + jobs_matched.
+        """
+        try:
+            users_ref = self.db.collection('users')
+            # Fetch all users to sort in Python (efficient for hackathon/SMB scale)
+            docs = users_ref.stream()
+            
+            leaderboard_data = []
+            for doc in docs:
+                data = doc.to_dict()
+                stats = data.get('stats', {})
+                
+                # Calculate Total Score
+                score = (
+                    stats.get('roadmaps_generated', 0) +
+                    stats.get('resumes_optimized', 0) +
+                    stats.get('assessments_taken', 0) +
+                    stats.get('jobs_matched', 0)
+                )
+                
+                # Only include users with some activity
+                if score >= 0: 
+                    user_info = {
+                        "name": data.get('name', 'Anonymous User'),
+                        "email": data.get('email', 'Hidden'),
+                        "linkedin": data.get('linkedin'),
+                        "github": data.get('github'),
+                        "skills": data.get('categorized_skills', {}), 
+                        "score": score,
+                        "stats": stats
+                    }
+                    leaderboard_data.append(user_info)
+            
+            # Sort by score descending (Highest first)
+            leaderboard_data.sort(key=lambda x: x['score'], reverse=True)
+            
+            return leaderboard_data[:limit]
+            
+        except Exception as e:
+            print(f"❌ Error fetching leaderboard: {e}")
+            return []
+        
     def close_connection(self):
         pass
 
