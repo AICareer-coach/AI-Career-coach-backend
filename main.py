@@ -45,9 +45,15 @@ else:
 app = FastAPI(title="AI Career Coach API", version="2.0.0")
 
 # --- CORS (Fixes 'Failed to fetch') ---
+
+origins = [
+    "https://ai-career-coach-backend-amp9.onrender.com",
+    "https://aicareer-coach.github.io"
+    # --- ACTION: ADD YOUR GITHUB PAGES URL HERE ---
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], 
+    allow_origins=origins, 
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
