@@ -3,7 +3,7 @@ import sys
 import json
 import re
 from typing import Optional, Tuple, Dict, Any, List
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from fastapi.params import Query
 import firebase_admin
@@ -20,18 +20,49 @@ def _stringify_list_content(content: Any) -> str:
         else: string_parts.append(str(item))
     return "\n".join(string_parts)
 
+
+def calculate_stats(numbers):
+    """Calculates mean and median for a list of numbers."""
+    if not numbers:
+        return {"mean": 0, "median": 0}
+        
+    numbers = sorted(numbers)
+    n = len(numbers)
+    mean = sum(numbers) / n
+
+    if n % 2 == 1:
+        median = numbers[n // 2]
+    else:
+        median = (numbers[n // 2 - 1] + numbers[n // 2]) / 2
+
+    return {
+        "mean": mean,
+        "median": median
+    }
+
 def _convert_firestore_timestamps(obj: Any) -> Any:
     """
     Recursively converts Firestore DatetimeWithNanoseconds objects (and standard datetime objects)
     to ISO 8601 strings to make them JSON serializable.
+    Also handles Firestore 'Sentinel' objects (like SERVER_TIMESTAMP) by converting to current time.
     """
     if isinstance(obj, dict):
         return {k: _convert_firestore_timestamps(v) for k, v in obj.items()}
     elif isinstance(obj, list):
         return [_convert_firestore_timestamps(elem) for elem in obj]
-    elif isinstance(obj, datetime): # Corrected: Changed from datetime.datetime to just datetime
+    elif isinstance(obj, datetime):
         return obj.isoformat()
-    # If it's not a dict, list, or datetime object, return it as is
+    
+    # Handle Firestore Sentinel objects or other non-serializable types
+    if not isinstance(obj, (str, int, float, bool, type(None))):
+        try:
+            name = type(obj).__name__
+            if 'Sentinel' in name:
+                return datetime.now().isoformat()
+            if 'DatetimeWithNanoseconds' in name:
+                return obj.isoformat()
+        except:
+            pass
     return obj
 
 
@@ -204,7 +235,7 @@ class DatabaseManager:
             if section_name and desc_to_use:
                 resume_data[section_name] = desc_to_use.split('\n') if isinstance(desc_to_use, str) else desc_to_use
 
-        return {k: v for k, v in resume_data.items() if v}
+        return _convert_firestore_timestamps({k: v for k, v in resume_data.items() if v})
 
     def update_resume_relational(self, user_uid: str, parsed_data: Dict[str, Any]) -> bool:
         """
@@ -360,7 +391,7 @@ class DatabaseManager:
             # Sort by score descending (Highest first)
             leaderboard_data.sort(key=lambda x: x['score'], reverse=True)
             
-            return leaderboard_data[:limit]
+            return _convert_firestore_timestamps(leaderboard_data[:limit])
             
         except Exception as e:
             print(f"❌ Error fetching leaderboard: {e}")
@@ -425,11 +456,197 @@ class DatabaseManager:
     def record_jobs_matched(self, uid: str, num_jobs: int = 1):
         self.increment_user_stat(uid, 'jobs_matched', num_jobs)
 
+    # --- NEW: Performance Tracking Methods ---
+
+    def save_assessment_result(self, uid: str, results: Dict[str, Any]):
+        """Saves a detailed assessment result to the user's assessments collection."""
+        try:
+            # Create a copy so we don't pollute the original dict with Firestore objects
+            db_data = results.copy()
+            db_data['timestamp'] = firestore.SERVER_TIMESTAMP
+            self.db.collection('users').document(uid).collection('assessments').add(db_data)
+            self.increment_user_stat(uid, 'assessments_taken')
+            print(f"✅ Assessment result saved for user {uid}.")
+        except Exception as e:
+            print(f"❌ Error saving assessment result for {uid}: {e}")
+
+    def save_interview_result(self, uid: str, results: Dict[str, Any]):
+        """Saves a detailed interview result to the user's interviews collection."""
+        try:
+            # Create a copy so we don't pollute the original dict with Firestore objects
+            db_data = results.copy()
+            db_data['timestamp'] = firestore.SERVER_TIMESTAMP
+            self.db.collection('users').document(uid).collection('interviews').add(db_data)
+            self.increment_user_stat(uid, 'interviews_taken')
+            print(f"✅ Interview result saved for user {uid}.")
+        except Exception as e:
+            print(f"❌ Error saving interview result for {uid}: {e}")
+
+    def save_ats_score_history(self, uid: str, score: int, job_role: str):
+        """Saves an ATS optimization score to the user's history."""
+        try:
+            data = {
+                'score': score,
+                'job_role': job_role,
+                'timestamp': firestore.SERVER_TIMESTAMP
+            }
+            self.db.collection('users').document(uid).collection('ats_history').add(data)
+            print(f"✅ ATS score ({score}) saved for user {uid}.")
+        except Exception as e:
+            print(f"❌ Error saving ATS score for {uid}: {e}")
+
+    async def get_user_performance_summary(self, uid: str) -> Dict[str, Any]:
+        """
+        Aggregates recent performance data to determine user's standing.
+        Returns average scores for assessments, interviews, and latest ATS score.
+        Also calculates roadmap completion rate.
+        """
+        try:
+            user_ref = self.db.collection('users').document(uid)
+            
+            # Helper to get score with fallbacks from different possible AI response field names
+            def get_score(data, primary_key='overall_score', fallback_keys=['score', 'rating', 'percentage', 'grade']):
+                if not data: return 0
+                val = data.get(primary_key)
+                if val is not None and isinstance(val, (int, float)): return val
+                for key in fallback_keys:
+                    val = data.get(key)
+                    if val is not None and isinstance(val, (int, float)): return val
+                return 0
+
+            # 1. Assessments - Fetch all and sort in Python (to handle docs missing timestamp)
+            assessments_list = [doc.to_dict() for doc in user_ref.collection('assessments').stream()]
+            print(f"DEBUG: Fetched {len(assessments_list)} raw assessments for user {uid}")
+            
+            # Sort by timestamp (newest first), treating missing timestamps as very old
+            assessments_list.sort(key=lambda x: str(x.get('timestamp', '0')), reverse=True)
+            
+            assessment_scores = [get_score(data) for data in assessments_list[:5]]
+            print(f"DEBUG: Top assessment scores for mean: {assessment_scores}")
+            assessment_stats = calculate_stats(assessment_scores)
+            avg_assessment = assessment_stats['mean']
+            
+            recent_assessments = []
+            for data in assessments_list[:3]:
+                recent_assessments.append({
+                    'name': data.get('assessment_type', 'Skill Assessment'),
+                    'score': get_score(data),
+                    'feedback': data.get('strengths', ["Good results"])[0] if data.get('strengths') and isinstance(data.get('strengths'), list) else (data.get('overall_feedback') or "Steady progress."),
+                    'improvement': data.get('areas_for_improvement', ["Keep practicing"])[0] if data.get('areas_for_improvement') and isinstance(data.get('areas_for_improvement'), list) else (data.get('weaknesses', ["Focus on core concepts."])[0] if isinstance(data.get('weaknesses'), list) and data.get('weaknesses') else "Refine your approach."),
+                    'timestamp': data.get('timestamp')
+                })
+
+            # 2. Interviews - Fetch all and sort in Python
+            interviews_list = [doc.to_dict() for doc in user_ref.collection('interviews').stream()]
+            print(f"DEBUG: Fetched {len(interviews_list)} raw interviews for user {uid}")
+            interviews_list.sort(key=lambda x: str(x.get('timestamp', '0')), reverse=True)
+            
+            interview_scores = [get_score(data) for data in interviews_list[:5]]
+            print(f"DEBUG: Top interview scores for mean: {interview_scores}")
+            interview_stats = calculate_stats(interview_scores)
+            avg_interview = interview_stats['mean']
+            
+            recent_interviews = []
+            for data in interviews_list[:3]:
+                recent_interviews.append({
+                    'name': data.get('job_role', 'Mock Interview'),
+                    'score': get_score(data),
+                    'feedback': data.get('overall_feedback', 'Balanced performance.'),
+                    'improvement': data.get('areas_for_improvement', ["Work on clarity"])[0] if data.get('areas_for_improvement') and isinstance(data.get('areas_for_improvement'), list) else "Refine your STAR responses.",
+                    'timestamp': data.get('timestamp')
+                })
+
+            # 3. Latest ATS Score and History (last 3).
+            ats_list = [doc.to_dict() for doc in user_ref.collection('ats_history').stream()]
+            print(f"DEBUG: Fetched {len(ats_list)} raw ATS records for user {uid}")
+            ats_list.sort(key=lambda x: str(x.get('timestamp', '0')), reverse=True)
+            
+            latest_ats = get_score(ats_list[0], primary_key='score') if ats_list else 0
+            
+            recent_ats = []
+            for data in ats_list[:3]:
+                recent_ats.append({
+                    'name': data.get('job_role', 'Resume Optimization'),
+                    'score': get_score(data, primary_key='score'),
+                    'feedback': "ATS optimization checked.",
+                    'improvement': "Incorporate more industry keywords.",
+                    'timestamp': data.get('timestamp')
+                })
+
+            
+            roadmap = await self.get_user_roadmap(uid)
+            completion_rate = 0
+            total_tasks = 0
+            completed_tasks = 0
+            recent_progress_tasks = []
+            roadmap_reason = "Welcome! Start an activity to see your career performance trends."
+            
+            if roadmap:
+                if 'last_adjustment_reason' in roadmap and roadmap['last_adjustment_reason']:
+                    roadmap_reason = roadmap['last_adjustment_reason']
+                
+                if 'detailed_roadmap' in roadmap:
+                    all_completed = []
+                    for phase in roadmap['detailed_roadmap']:
+                        topics = phase.get('topics', [])
+                        for topic in topics:
+                            total_tasks += 1
+                            if isinstance(topic, dict) and topic.get('is_completed'):
+                                completed_tasks += 1
+                                all_completed.append(topic)
+                    
+                    completion_rate = (completed_tasks / total_tasks * 100) if total_tasks > 0 else 0
+                    
+                    # Sort by completed_at if available
+                    all_completed.sort(key=lambda x: x.get('completed_at', ''), reverse=True)
+                    for task in all_completed[:3]:
+                        recent_progress_tasks.append({
+                            'name': task.get('name', 'Roadmap Task'),
+                            'score': 100, # completed
+                            'feedback': "Task successfully completed.",
+                            'improvement': "Continue to the next objective.",
+                            'timestamp': task.get('completed_at')
+                        })
+
+            # --- Composite Score Calculation (General) ---
+            # Weights: Progress (30%), Assessment (25%), Interview (25%), ATS (20%)
+            composite_score = (completion_rate * 0.30) + (avg_assessment * 0.25) + (avg_interview * 0.25) + (latest_ats * 0.20)
 
 
+            return _convert_firestore_timestamps({
+                'avg_assessment': avg_assessment,
+                'avg_interview': avg_interview,
+                'latest_ats': latest_ats,
+                'completion_rate': completion_rate,
+                'composite_score': round(composite_score, 2),
+                'roadmap_reason': roadmap_reason,
+                'total_assessments': len(assessment_scores),
+                'total_interviews': len(interview_scores),
+                'tasks_completed': completed_tasks,
+                'total_tasks': total_tasks,
+                'recent_activities': {
+                    'assessments': recent_assessments,
+                    'interviews': recent_interviews,
+                    'ats': recent_ats,
+                    'progress': recent_progress_tasks
+                }
+            })
+        except Exception as e:
+            print(f"❌ Error fetching performance summary for {uid}: {e}")
+            import traceback
+            traceback.print_exc()
+            return {
+                'error': str(e),
+                'avg_assessment': 0, 'avg_interview': 0, 'latest_ats': 0, 
+                'completion_rate': 0, 'total_assessments': 0, 'total_interviews': 0,
+                'tasks_completed': 0, 'total_tasks': 0,
+                'recent_activities': {
+                    'assessments': [], 'interviews': [], 'ats': [], 'progress': []
+                }
+            }
 
     # MODIFIED LOGIC: This function now deletes all previous roadmaps before creating the new one.
-    async def save_user_roadmap(self, user_uid: str, new_roadmap_data: Dict[str, Any]) -> bool:
+    async def save_user_roadmap(self, user_uid: str, new_roadmap_data: Dict[str, Any], last_adjustment_reason: Optional[str] = None) -> bool:
         """
         Ensures only one roadmap exists by deleting all previous roadmap documents
         for the user before creating the new one.
@@ -446,9 +663,11 @@ class DatabaseManager:
             # Step 2: Create the new roadmap document.
             data_to_add = {
                 'createdAt': firestore.SERVER_TIMESTAMP,
+                'last_adjustment_reason': last_adjustment_reason,
                 **new_roadmap_data
             }
             roadmaps_collection.add(data_to_add)
+
             
             print(f"✅ New roadmap created after clearing previous for user {user_uid}.")
             return True
@@ -466,7 +685,7 @@ class DatabaseManager:
             the_only_roadmap_doc = next(docs, None)
 
             if the_only_roadmap_doc:
-                return the_only_roadmap_doc.to_dict()
+                return _convert_firestore_timestamps(the_only_roadmap_doc.to_dict())
             else:
                 return None
         except Exception as e:
@@ -475,11 +694,13 @@ class DatabaseManager:
 
     # This function also correctly finds and updates the one and only roadmap document.
     async def update_roadmap_task_status(self, user_uid: str, phase_title: str, topic_name: str, is_completed: bool) -> bool:
-        """Finds the single roadmap document and updates a task's status."""
+        """Finds the single roadmap document and updates a task's status with a completion timestamp."""
         try:
             roadmaps_collection = self.db.collection('users').document(user_uid).collection('roadmaps')
+            # Since we ensure only one roadmap exists per user, we don't need sorting which can exclude docs missing the field.
             docs = roadmaps_collection.limit(1).stream()
             the_only_roadmap_doc = next(docs, None)
+
 
             if not the_only_roadmap_doc:
                 print(f"❌ No roadmap document found for user {user_uid}. Cannot update.")
@@ -497,6 +718,10 @@ class DatabaseManager:
                     for topic in phase['topics']:
                         if isinstance(topic, dict) and topic.get('name') == topic_name:
                             topic['is_completed'] = is_completed
+                            if is_completed:
+                                topic['completed_at'] = datetime.now().isoformat()
+                            elif 'completed_at' in topic:
+                                del topic['completed_at']
                             task_found_and_updated = True
                             break
                 if task_found_and_updated:
@@ -511,3 +736,103 @@ class DatabaseManager:
         except Exception as e:
             print(f"❌ Error updating roadmap task status for user {user_uid}: {e}")
             raise
+
+    async def get_performance_history(self, uid: str) -> Dict[str, Any]:
+        """
+        Calculates cumulative performance trends:
+        1. Recent (This Week): Last 7 days.
+        2. Prior (Previous Weeks): Everything before that.
+        3. Total (Collective): Overall averages.
+        """
+        try:
+            now = datetime.now()
+            one_week_ago = now - timedelta(days=7)
+            user_ref = self.db.collection('users').document(uid)
+
+            def aggregate_scores(collection_name, field='overall_score'):
+                recent = []
+                prior = []
+                docs = user_ref.collection(collection_name).stream()
+                for doc in docs:
+                    data = doc.to_dict()
+                    ts = data.get('timestamp')
+                    # Firestore timestamps are datetime objects if using recent SDK
+                    # But we sanitize them to strings in get_user_performance_summary
+                    # Here we need to handle them carefully.
+                    if ts and isinstance(ts, datetime):
+                        score = data.get(field, 0)
+                        if ts > one_week_ago:
+                            recent.append(score)
+                        else:
+                            prior.append(score)
+                
+                recent_avg = calculate_stats(recent)['mean']
+                prior_avg = calculate_stats(prior)['mean']
+                total_avg = calculate_stats(recent + prior)['mean']
+                return recent_avg, prior_avg, total_avg
+
+            # 1. Assessments
+            rec_ass, pri_ass, tot_ass = aggregate_scores('assessments')
+
+            # 2. Interviews
+            rec_int, pri_int, tot_int = aggregate_scores('interviews')
+
+            # 3. ATS Scores
+            rec_ats, pri_ats, tot_ats = aggregate_scores('ats_history', field='score')
+
+            # 4. Progress Tracking
+            # We count tasks completed this week vs total prior
+            roadmap = await self.get_user_roadmap(uid)
+            rec_progress = 0
+            pri_progress = 0
+            total_tasks_count = 0
+            if roadmap and 'detailed_roadmap' in roadmap:
+                for phase in roadmap['detailed_roadmap']:
+                    for topic in phase.get('topics', []):
+                        total_tasks_count += 1
+                        if topic.get('is_completed'):
+                            comp_at_str = topic.get('completed_at')
+                            if comp_at_str:
+                                try:
+                                    comp_at = datetime.fromisoformat(comp_at_str)
+                                    if comp_at > one_week_ago:
+                                        rec_progress += 1
+                                    else:
+                                        pri_progress += 1
+                                except ValueError:
+                                    pri_progress += 1 # Fallback
+                            else:
+                                pri_progress += 1 # Old completions
+
+            # --- 5. Composite Score Calculation ---
+            # Weights: Progress (30%), Assessment (25%), Interview (25%), ATS (20%)
+            # For Progress, we use (completed/total) * 100
+            
+            total_completion_rate = (rec_progress + pri_progress) / total_tasks_count * 100 if total_tasks_count > 0 else 0
+            # Weekly completion rate could be (rec_progress / expected_per_week) but we'll use a simplified version:
+            # (rec_progress / (total_tasks_count / total_weeks)) if we knew total weeks.
+            # Let's just use the total averages for now as specified.
+            
+            comp_prog = total_completion_rate
+            comp_ass = tot_ass
+            comp_int = tot_int
+            comp_ats = tot_ats
+            
+            # Weighted average
+            composite_score = (comp_prog * 0.30) + (comp_ass * 0.25) + (comp_int * 0.25) + (comp_ats * 0.20)
+
+            return {
+                "assessments": {"recent": rec_ass, "prior": pri_ass, "total": tot_ass},
+                "interviews": {"recent": rec_int, "prior": pri_int, "total": tot_int},
+                "ats": {"recent": rec_ats, "prior": pri_ats, "total": tot_ats},
+                "progress": {"recent_count": rec_progress, "prior_count": pri_progress, "total_count": rec_progress + pri_progress, "total_tasks": total_tasks_count},
+                "composite_score": round(composite_score, 2),
+                "trends": {
+                    "assessment_diff": rec_ass - pri_ass if pri_ass > 0 else 0,
+                    "interview_diff": rec_int - pri_int if pri_int > 0 else 0,
+                    "ats_diff": rec_ats - pri_ats if pri_ats > 0 else 0
+                }
+            }
+        except Exception as e:
+            print(f"❌ Error getting performance history for {uid}: {e}")
+            return {}
