@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ personal_info.name }} | Portfolio</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://unpkg.com/aos@2.3.1/dist/aos.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;800&display=swap');
+        body { font-family: 'Plus Jakarta Sans', sans-serif; background: #fdfdff; color: #1e293b; }
+        .floating { animation: float 6s ease-in-out infinite; }
+        @keyframes float { 0% { transform: translateY(0px); } 50% { transform: translateY(-10px); } 100% { transform: translateY(0px); } }
+        .gradient-bg { background: linear-gradient(135deg, #6366f1 0%, #a855f7 100%); }
+    </style>
+</head>
+<body>
+
+    <nav class="p-6 max-w-6xl mx-auto flex justify-between items-center">
+        <span class="text-2xl font-extrabold tracking-tighter gradient-text">PORTFOLIO.</span>
+        <a href="mailto:{{ personal_info.email }}" class="px-6 py-2 rounded-full bg-slate-900 text-white text-sm font-bold hover:scale-105 transition">Hire Me</a>
+    </nav>
+
+    <header class="pt-20 pb-32 px-6 text-center">
+        <div data-aos="zoom-in">
+            <h1 class="text-6xl md:text-8xl font-black mb-8 leading-none tracking-tighter">
+                Crafting the <span class="text-indigo-600">Future</span><br>of the Web.
+            </h1>
+            <p class="text-xl text-slate-500 max-w-2xl mx-auto leading-relaxed mb-10">
+                I'm {{ personal_info.name }}. {{ summary }}
+            </p>
+        </div>
+    </header>
+
+    <main class="max-w-6xl mx-auto px-6 space-y-40 pb-40">
+        
+        <!-- Experience -->
+        <section data-aos="fade-up">
+            <h2 class="text-4xl font-black mb-16 tracking-tighter">My Journey.</h2>
+            <div class="grid gap-8">
+                {% for job in full_experience %}
+                <div class="p-10 bg-white rounded-3xl shadow-xl shadow-indigo-100 border border-slate-50 hover:scale-[1.02] transition duration-500">
+                    <div class="flex flex-wrap justify-between items-center mb-6">
+                        <div>
+                            <h3 class="text-2xl font-extrabold text-slate-900">{{ job.role }}</h3>
+                            <p class="text-indigo-600 font-bold uppercase text-sm tracking-widest">{{ job.company }}</p>
+                        </div>
+                        <span class="px-4 py-2 bg-indigo-50 text-indigo-600 rounded-full font-bold text-xs">{{ job.duration }}</span>
+                    </div>
+                    <ul class="space-y-3">
+                        {% for p in job.description %}<li class="text-slate-600 flex gap-4"><i class="fas fa-check-circle text-indigo-400 mt-1"></i> {{ p }}</li>{% endfor %}
+                    </ul>
+                </div>
+                {% endfor %}
+            </div>
+        </section>
+
+        <!-- Projects -->
+        <section data-aos="fade-up">
+            <h2 class="text-4xl font-black mb-16 tracking-tighter">Work & Projects.</h2>
+            <div class="grid md:grid-cols-2 gap-10">
+                {% for p in projects %}
+                <div class="group relative overflow-hidden rounded-3xl bg-slate-900 aspect-square">
+                    <div class="absolute inset-0 bg-indigo-600 opacity-0 group-hover:opacity-90 transition-opacity duration-500 z-10"></div>
+                    <div class="absolute inset-0 p-12 flex flex-col justify-end text-white z-20 opacity-0 group-hover:opacity-100 transform translate-y-10 group-hover:translate-y-0 transition-all duration-500">
+                        <h3 class="text-3xl font-black mb-4">{{ p.title }}</h3>
+                        <p class="text-indigo-100 mb-6 line-clamp-3">{% for pt in p.description %}{{ pt }} {% endfor %}</p>
+                        <a href="#" class="text-sm font-bold underline">View Case Study</a>
+                    </div>
+                    <div class="absolute inset-0 flex items-center justify-center text-8xl font-black text-white/5 select-none">
+                        {{ p.title[:2] | upper }}
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+        </section>
+
+    </main>
+
+    <footer class="bg-slate-950 py-20 text-white text-center">
+        <h2 class="text-3xl font-black mb-4 tracking-tighter">Ready to start a project?</h2>
+        <p class="text-slate-400 mb-8">{{ personal_info.email }}</p>
+        <div class="flex justify-center gap-6 text-2xl">
+            {% if personal_info.linkedin %}<i class="fab fa-linkedin"></i>{% endif %}
+            {% if personal_info.github %}<i class="fab fa-github"></i>{% endif %}
+        </div>
+    </footer>
+
+    <script src="https://unpkg.com/aos@2.3.1/dist/aos.js"></script>
+    <script>AOS.init({ duration: 1000, once: true });</script>
+</body>
+</html>
