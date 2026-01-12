@@ -65,7 +65,7 @@ app.add_middleware(
 # Include Routers
 # ------------------------------
 # Ensure 'portfolio.py' exists in the 'routers' folder!
-from routers import auth, resume, roadmap, user, joblisting, assessment, interview
+from routers import auth, resume, roadmap, user, joblisting, assessment, interview,portfolio
 
 # Register the routes
 app.include_router(auth.router, prefix="/api/auth", tags=["Authentication"])
@@ -77,6 +77,8 @@ app.include_router(assessment.router, prefix="/api/assessment", tags=["Skill Ass
 app.include_router(interview.router, prefix="/api/interview", tags=["Mock Interview"])
 
 app.include_router(leaderboard.router, prefix="/api/leaderboard", tags=["Leaderboard"])
+# --- THE MISSING PORTFOLIO ROUTER ---
+app.include_router(portfolio.router, prefix="/api/portfolio", tags=["Portfolio Builder"])
 
 # ------------------------------
 # Root Endpoint
