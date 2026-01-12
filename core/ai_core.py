@@ -1,4 +1,5 @@
 from datetime import datetime
+from pathlib import Path
 import os
 import io
 import sys
@@ -28,13 +29,20 @@ MODEL_NAME = "models/gemini-2.5-flash"
 def setup_api_keys():
     """Loads all available Gemini API keys from environment variables."""
     global API_KEYS
-    load_dotenv()
+    # Try to find .env in current dir or parent dir
+    env_path = Path(__file__).resolve().parent.parent / '.env'
+    if env_path.exists():
+        print(f"DEBUG: Loading .env from {env_path}")
+        load_dotenv(dotenv_path=env_path)
+    else:
+        print(f"DEBUG: .env not found at {env_path}, trying default load_dotenv()")
+        load_dotenv()
     
     i = 1
     while True:
         key = os.getenv(f"GEMINI_API_KEY_{i}")
         if i == 1 and not key:
-             key = os.getenv("GEMINI_API_KEY") # Backward compatibility for the first key
+             key = os.getenv("GOOGLE_API_KEY") # Backward compatibility for the first key
 
         if key:
             API_KEYS.append(key)
@@ -43,9 +51,13 @@ def setup_api_keys():
             break
     
     if not API_KEYS:
-        print("CRITICAL ERROR: No 'GEMINI_API_KEY_1' or 'GOOGLE_API_KEY' found. Application cannot start.")
+        print("CRITICAL ERROR: No 'GEMINI_API_KEY_1' or 'GOOGLE_API_KEY' found in environment variables.")
+        # Instead of exit, let's just warn and let the server start (though functions will fail)
+        # However, the user might prefer an exit to catch config errors early.
+        # I'll keep the exit but make it more descriptive.
+        print("Please ensure your .env file exists in the Backend folder and contains GOOGLE_API_KEY.")
         sys.exit(1)
-        
+    
     print(f"✅ Successfully loaded {len(API_KEYS)} Gemini API key(s).")
 
 # Initialize the keys when the module is loaded
@@ -519,11 +531,14 @@ def generate_career_roadmap(user_profile: Dict[str, Any]) -> Optional[Dict[str, 
     1.  "domain": "Full-Stack Development"
     2.  "extracted_skills_and_projects": {{ "skills": ["React", "Node.js"], "projects": ["E-commerce Platform"] }}
     3.  "job_match_score": {{ "score": 75, "summary": "A brief, plain-text summary, STRICTLY under 50 words." }}
-    4.  "skills_to_learn_summary": ["State Management (Redux)", "Advanced API Design"]
+    4.  "skills_to_learn_summary": ["State Management (Redux)", "Advanced API Design"] 
+        (STRICT RULE: Focus only on the TOP 6 most critical skills. Never exceed 6 items in this list.)
     5.  "timeline_chart_data": {{ "labels": ["Phase 1: Foundations", "Phase 2: Backend"], "durations": [4, 5] }}
     6.  "detailed_roadmap": [{{ "phase_title": "Phase 1: Frontend Fundamentals", "phase_duration": "4 weeks", "topics": ["React Hooks", "Component Lifecycle"] }}]
+        (STRICT RULE: Include exactly 6 high-impact tasks/topics per phase. Each item must be a specific, actionable learning milestone.)
     7.  "suggested_projects": [{{ "project_title": "Real-time Whiteboard", "project_level": "Advanced", "skills_mapped": ["React", "Socket.io"], "what_you_will_learn": "Real-time communication and canvas manipulation.", "implementation_plan": ["Week 1-2: Setup canvas and basic drawing.", "Week 3-4: Implement Socket.io for real-time events."] }}]
     8.  "suggested_courses": [{{ "course_name": "MERN Stack Front To Back", "platform": "Udemy", "url": "https://www.udemy.com/course/mern-stack-front-to-back/", "mapping": "Covers foundational and advanced MERN stack skills for your entire roadmap. This certificate covers the foundational skills in Phase 1 and 2." }}]
+
     """
     response = _call_gemini_with_fallback(prompt)
     if not response: return None
@@ -1137,3 +1152,74 @@ def process_audio_answer(audio_content: bytes, question: str, job_description: s
             "feedback": "A technical error occurred while processing your answer. Please try recording again for the same question.",
             "next_question": question
         }
+def evaluate_and_adjust_roadmap(current_roadmap: dict, performance_summary: dict, trend_data: Optional[dict] = None) -> dict:
+    """
+    Analyzes user performance against their current roadmap and adjusts it dynamically.
+    Uses collective trend data (this week vs previous weeks) to determine if an upgrade or downgrade is needed.
+    """
+
+    trend_context = ""
+    if trend_data:
+        comp_score = trend_data.get('composite_score', 0)
+        trend_context = f"""
+    **COLLECTIVE PERFORMANCE & TRENDS:**
+    - OVERALL COMPOSITE SCORE: {comp_score}% (Weighted: 30% Progress, 25% Assessments, 25% Interviews, 20% ATS)
+    - Assessments: This Week ({trend_data['assessments']['recent']}%) vs Previous ({trend_data['assessments']['prior']}%) | Total Avg: {trend_data['assessments']['total']}%
+    - Interviews: This Week ({trend_data['interviews']['recent']}%) vs Previous ({trend_data['interviews']['prior']}%) | Total Avg: {trend_data['interviews']['total']}%
+    - ATS Scores: This Week ({trend_data['ats']['recent']}%) vs Previous ({trend_data['ats']['prior']}%) | Total Avg: {trend_data['ats']['total']}%
+    - Progress: Tasks Completed This Week ({trend_data['progress']['recent_count']}) vs Previous ({trend_data['progress']['prior_count']}) | Total: {trend_data['progress']['total_count']}
+    """
+
+    prompt = f"""
+    You are an AI Career Performance Analyst. Your task is to evaluate a user's progress and dynamically adjust their career roadmap.
+    
+    **CURRENT ROADMAP:**
+    `json
+    {json.dumps(current_roadmap, indent=2)}
+    `
+    
+    {trend_context}
+
+    **YOUR EVALUATION CRITERIA (Weighted by Composite Score):**
+    1. **UPGRADE (Accelerate):** If the *Composite Score* is high (>80%), significantly accelerate the roadmap. Introduce advanced frameworks, complex cloud architecture, or system design projects. Reduce durations of future tasks.
+    2. **MAINTAIN:** If the *Composite Score* is between 65-80%, keep the current pace but suggest 1 optional "stretch" task.
+    3. **STAGNATION (Extend):** If the *Composite Score* is low due to *Recent Progress* (< 10% on Progress weight) but other scores are high, extend current task durations by 1-2 weeks.
+    4. **DOWNGRADE/REFINE (Remedial):** If any *Total Average* is <60% or the *Composite Score* has dropped by >15 pts this week, add foundational "Refresher" tasks to the *current* phase.
+    5. **ATS FOCUS:** If the *Latest ATS* score is <70, prioritize 'Resume & LinkedIn Optimization' tasks immediately.
+
+    **OUTPUT:**
+    Generate a JSON object which is the UPDATED version of the 'detailed_roadmap' and 'suggested_projects'. 
+    You MUST also include a 'performance_feedback' string (max 100 words) summarizing the collective trend and why you made these changes.
+
+    **JSON OUTPUT SCHEMA:**
+    {{
+        "performance_feedback": "string",
+        "is_updated": true,
+        "updated_roadmap": {{
+             "detailed_roadmap": [...],
+             "suggested_projects": [...],
+             "skills_to_learn_summary": [...]
+        }}
+    }}
+
+    **Rules:**
+    - Return ONLY the valid JSON object.
+    - If no changes are needed, return is_updated: false and the original data.
+    - Be encouraging but realistic.
+    - **CRITICAL REGENERATION RULE:** When updating, you MUST **completely replace** all UNCOMPLETED tasks with entirely new, logically adaptive topics. Do NOT just reorder or slightly edit existing tasks. They must be fresh learning milestones that reflect the user's current trajectory (Improvement or Struggle).
+    - **LIMITS:** 
+        - Max 6 items in `skills_to_learn_summary`.
+        - Exactly 6 topics per phase in `detailed_roadmap`.
+    - **PRESERVATION:** You MUST preserve the names of tasks in 'detailed_roadmap' that have `"is_completed": true` to maintain historical consistency, but you may move them to an earlier "Completed Progress" section or keep them in their original phases if it makes logical sense for the new timeline.
+
+    """
+    
+    response = _call_gemini_with_fallback(prompt)
+    if not response: return None
+    
+    data = _safe_json_loads(response.text, fallback=None)
+    if not data:
+        print("\n--- ERROR: GEMINI FAILED TO ADJUST ROADMAP ---")
+        return None
+        
+    return data
