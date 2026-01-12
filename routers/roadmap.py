@@ -10,12 +10,13 @@ if str(backend_dir) not in sys.path:
 
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 
 from core.db_core import DatabaseManager
-from core.ai_core import generate_career_roadmap, get_tutor_explanation, get_chatbot_response
+from core.ai_core import generate_career_roadmap, get_tutor_explanation, get_chatbot_response, evaluate_and_adjust_roadmap
+msg = "" # Placeholder for optional messaging
 from dependencies import get_db_manager, get_current_user
 
 router = APIRouter()
@@ -163,6 +164,9 @@ class TaskStatusUpdateRequest(BaseModel):
     topic_name: str
     is_completed: bool
 
+class PerformanceUpdateRequest(BaseModel):
+    google_access_token: Optional[str] = None
+
 # --- Helper Function ---
 def initialize_roadmap_progress(roadmap_data: Dict[str, Any]) -> Dict[str, Any]:
     """Ensures every topic in the detailed roadmap is a dictionary with progress."""
@@ -213,6 +217,9 @@ async def update_roadmap_task_status_endpoint(request: TaskStatusUpdateRequest, 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"An internal server error occurred: {str(e)}")
 
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"An internal server error occurred: {str(e)}")
+
 @router.post("/tutor")
 async def get_tutor_response_endpoint(request: TutorRequest, user: dict = Depends(get_current_user)):
     try:
@@ -222,6 +229,132 @@ async def get_tutor_response_endpoint(request: TutorRequest, user: dict = Depend
         return tutor_response
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"An internal server error occurred: {str(e)}")
+
+@router.get("/performance")
+async def get_performance_endpoint(user: dict = Depends(get_current_user), db: DatabaseManager = Depends(get_db_manager)):
+    """Returns a summary of the user's performance across assessments, interviews, and ATS."""
+    return await db.get_user_performance_summary(user['uid'])
+
+@router.post("/evaluate_and_update")
+async def evaluate_and_update_roadmap_endpoint(request: PerformanceUpdateRequest, user: dict = Depends(get_current_user), db: DatabaseManager = Depends(get_db_manager)):
+    """
+    Dynamically evaluates the user's progress and adjusts the roadmap if they are off-track or excelling.
+    If a Google Access Token is provided, it also re-syncs the updated roadmap.
+    """
+    uid = user['uid']
+    try:
+        # 1. Fetch current roadmap and performance summary
+        roadmap = await db.get_user_roadmap(uid)
+        if not roadmap:
+            raise HTTPException(status_code=404, detail="No roadmap found to evaluate.")
+        
+        # Determine if we should force or check last update
+        # For this endpoint, we always force as it's a manual trigger
+        
+        # 2. Fetch Collective Performance History
+        performance_summary = await db.get_user_performance_summary(uid) # Basic summary
+        trend_data = await db.get_performance_history(uid) # Detailed trends
+        
+        # 3. Call AI to adjust roadmap with Trend Data
+        adjustment_result = evaluate_and_adjust_roadmap(roadmap, performance_summary, trend_data=trend_data)
+        
+        if not adjustment_result:
+             raise HTTPException(status_code=500, detail="AI failed to evaluate roadmap adjustment.")
+        
+        if adjustment_result.get('is_updated'):
+            # Carry over progress
+            progress_map = {}
+            if 'detailed_roadmap' in roadmap:
+                for phase in roadmap['detailed_roadmap']:
+                    for topic in phase.get('topics', []):
+                        if isinstance(topic, dict) and topic.get('is_completed'):
+                            progress_map[topic.get('name')] = True
+
+            updated_data = adjustment_result['updated_roadmap']
+            for key in ['detailed_roadmap', 'suggested_projects', 'skills_to_learn_summary']:
+                if key in updated_data:
+                    roadmap[key] = updated_data[key]
+            
+            roadmap = initialize_roadmap_progress(roadmap)
+
+            if 'detailed_roadmap' in roadmap:
+                for phase in roadmap['detailed_roadmap']:
+                    for topic in phase.get('topics', []):
+                        if isinstance(topic, dict) and topic.get('name') in progress_map:
+                            topic['is_completed'] = True
+            
+            await db.save_user_roadmap(uid, roadmap, last_adjustment_reason=adjustment_result.get('performance_feedback', ""))
+            sync_message = "Roadmap was updated based on your recent progress and collective trends."
+        else:
+            sync_message = "Your roadmap is already well-aligned with your current progress. Keep it up!"
+
+        return {
+            "message": sync_message,
+            "feedback": adjustment_result.get('performance_feedback', ""),
+            "is_updated": adjustment_result.get('is_updated', False),
+            "roadmap": roadmap
+        }
+
+    except Exception as e:
+        print(f"❌ Error in evaluate_and_update: {e}")
+        raise HTTPException(status_code=500, detail=f"An internal server error occurred: {str(e)}")
+
+@router.post("/check_auto_personalize")
+async def check_auto_personalize_endpoint(user: dict = Depends(get_current_user), db: DatabaseManager = Depends(get_db_manager)):
+    """
+    Quietly checks if it's time for a weekly roadmap update.
+    Returns the updated roadmap if a change occurred.
+    """
+    uid = user['uid']
+    try:
+        roadmap = await db.get_user_roadmap(uid)
+        if not roadmap:
+            return {"is_updated": False, "reason": "No roadmap found."}
+        
+        last_upd_str = roadmap.get('last_personalized_at')
+        if last_upd_str:
+            last_upd = datetime.fromisoformat(last_upd_str)
+            if datetime.now() - last_upd < timedelta(days=7):
+                return {"is_updated": False, "reason": "Updated less than 7 days ago."}
+        
+        # Trigger same logic as evaluate_and_update
+        performance_summary = await db.get_user_performance_summary(uid)
+        trend_data = await db.get_performance_history(uid)
+        
+        adjustment_result = evaluate_and_adjust_roadmap(roadmap, performance_summary, trend_data=trend_data)
+        
+        if adjustment_result and adjustment_result.get('is_updated'):
+            progress_map = {}
+            if 'detailed_roadmap' in roadmap:
+                for phase in roadmap['detailed_roadmap']:
+                    for topic in phase.get('topics', []):
+                        if isinstance(topic, dict) and topic.get('is_completed'):
+                            progress_map[topic.get('name')] = True
+
+            updated_data = adjustment_result['updated_roadmap']
+            for key in ['detailed_roadmap', 'suggested_projects', 'skills_to_learn_summary']:
+                if key in updated_data:
+                    roadmap[key] = updated_data[key]
+            
+            roadmap = initialize_roadmap_progress(roadmap)
+            if 'detailed_roadmap' in roadmap:
+                for phase in roadmap['detailed_roadmap']:
+                    for topic in phase.get('topics', []):
+                        if isinstance(topic, dict) and topic.get('name') in progress_map:
+                            topic['is_completed'] = True
+            
+            await db.save_user_roadmap(uid, roadmap, last_adjustment_reason=adjustment_result.get('performance_feedback', ""))
+            return {
+                "is_updated": True,
+                "message": "We've refined your roadmap based on your progress trends from this week!",
+                "feedback": adjustment_result.get('performance_feedback', ""),
+                "roadmap": roadmap
+            }
+        
+        return {"is_updated": False}
+    except Exception as e:
+        print(f"❌ Error in check_auto_personalize: {e}")
+        return {"is_updated": False, "error": str(e)}
 
 # --- CHATBOT SECTION ---
 
