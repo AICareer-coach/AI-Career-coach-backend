@@ -16,3 +16,4 @@ PyPDF2
 beautifulsoup4
 playwright
 requests
+jinja2
